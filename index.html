@@ -3,51 +3,366 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PoC WebGPU - SmolLM2 135M</title>
+    <title>PoC Canvas + Transformers.js v4</title>
     <style>
-      body { font-family: system-ui, Arial, sans-serif; margin: 40px auto; max-width: 900px; line-height: 1.5; }
-      h1 { color: #333; }
-      #status { font-weight: bold; margin: 15px 0; padding: 10px; background: #f0f0f0; border-radius: 6px; }
-      textarea { width: 100%; height: 100px; padding: 12px; font-size: 16px; }
-      button { padding: 12px 24px; font-size: 16px; background: #0066ff; color: white; border: none; border-radius: 6px; cursor: pointer; }
-      button:hover { background: #0052cc; }
-      #output {
-        margin-top: 20px;
-        padding: 15px;
-        background: #f9f9f9;
-        border: 1px solid #ddd;
-        border-radius: 8px;
-        min-height: 300px;
-        max-height: 60vh;
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { background: #0a0a0f; overflow: hidden; font-family: system-ui, sans-serif; }
+
+      #app-canvas {
+        display: block;
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+      }
+
+      /* layoutsubtree children: styled via CSS classes. Snapshot captured by drawElementImage */
+      /* position:absolute + % size ensures exact match with canvas dimensions */
+      #canvas-content {
+        position: absolute;
+        top: 0; left: 0;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: visible;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+      }
+
+      /* ===== LOGIN STYLES (HEAD + inline for snapshot) ===== */
+      .login-card {
+        background: linear-gradient(145deg, #12122a 0%, #1a1a3a 100%);
+        border-radius: 20px; padding: 48px;
+        width: 420px; max-width: 90vw;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.4), 0 0 80px rgba(108,92,231,0.08);
+        border: 1px solid rgba(108,92,231,0.15);
+      }
+      .login-title {
+        color: #fff; margin: 0 0 6px;
+        font-size: 26px; font-weight: 700;
+        text-align: center; letter-spacing: -0.5px;
+      }
+      .login-subtitle {
+        color: #6b6b8a; margin: 0 0 36px;
+        font-size: 13.5px; text-align: center;
+      }
+      .login-label {
+        color: #8a8aaa; font-size: 12px;
+        display: block; margin-bottom: 6px;
+        font-weight: 500; text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+      .login-input {
+        width: 100%; padding: 14px 16px;
+        background: rgba(10,10,21,0.8);
+        border: 1.5px solid #2a2a55;
+        border-radius: 10px; color: #fff;
+        font-size: 14px; margin-bottom: 20px;
+        outline: none; transition: all 0.2s ease;
+      }
+      .login-input::placeholder { color: #4a4a6a; }
+      .login-input:hover { border-color: #3a3a6a; }
+      .login-input:focus {
+        border-color: #6c5ce7;
+        box-shadow: 0 0 0 3px rgba(108,92,231,0.15);
+      }
+      .login-btn {
+        width: 100%; padding: 16px;
+        background: linear-gradient(135deg, #6c5ce7 0%, #8e7cf5 100%);
+        color: #fff; border: none;
+        border-radius: 10px; font-size: 15px;
+        font-weight: 600; cursor: pointer;
+        transition: all 0.2s ease;
+        box-shadow: 0 4px 16px rgba(108,92,231,0.3);
+      }
+      .login-btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 24px rgba(108,92,231,0.4);
+      }
+      .login-btn:active { transform: translateY(0); }
+
+      /* ===== DASHBOARD STYLES (HEAD + inline for snapshot) ===== */
+      .dashboard-container {
+        width: 100%; max-width: 1100px;
+        margin: 0 auto; padding: 28px;
+      }
+      .dashboard-header {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 20px 28px;
+        background: linear-gradient(145deg, #12122a 0%, #1a1a3a 100%);
+        border-radius: 16px; margin-bottom: 28px;
+        border: 1px solid rgba(108,92,231,0.1);
+        box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+      }
+      .dashboard-title {
+        color: #fff; font-size: 20px;
+        margin: 0; font-weight: 700;
+      }
+      .dashboard-subtitle {
+        color: #6b6b8a; font-size: 12px;
+        margin: 4px 0 0;
+      }
+      .dashboard-logout {
+        padding: 10px 24px;
+        background: rgba(255,107,107,0.1);
+        color: #ff6b6b; border: 1px solid rgba(255,107,107,0.2);
+        border-radius: 8px; cursor: pointer;
+        font-size: 13px; font-weight: 500;
+        transition: all 0.2s ease;
+      }
+      .dashboard-logout:hover {
+        background: rgba(255,107,107,0.2);
+        border-color: rgba(255,107,107,0.35);
+      }
+      .dashboard-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 24px; margin-bottom: 28px;
+      }
+      .dashboard-card {
+        background: linear-gradient(145deg, #12122a 0%, #1a1a3a 100%);
+        border-radius: 16px; padding: 28px;
+        border: 1px solid rgba(108,92,231,0.08);
+        box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+        transition: all 0.2s ease;
+      }
+      .dashboard-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+        border-color: rgba(108,92,231,0.15);
+      }
+      .dashboard-card-label {
+        color: #8a8aaa; font-size: 12.5px;
+        margin: 0 0 6px; font-weight: 500;
+        text-transform: uppercase; letter-spacing: 0.5px;
+      }
+      .dashboard-card-value {
+        color: #fff; font-size: 32px;
+        font-weight: 700; margin: 0;
+        letter-spacing: -0.5px;
+      }
+      .dashboard-panel {
+        background: linear-gradient(145deg, #12122a 0%, #1a1a3a 100%);
+        border-radius: 16px; padding: 28px;
+        border: 1px solid rgba(108,92,231,0.08);
+        box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+      }
+      .dashboard-panel-title {
+        color: #fff; font-size: 16px;
+        margin: 0 0 20px; font-weight: 600;
+      }
+      .dashboard-table { width: 100%; border-collapse: collapse; }
+      .dashboard-table th {
+        color: #8a8aaa; font-size: 11.5px;
+        text-align: left; padding: 14px 10px;
+        border-bottom: 1.5px solid #1e1e3a;
+        font-weight: 600; text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+      .dashboard-table td {
+        color: #c0c0d0; padding: 14px 10px;
+        font-size: 13.5px;
+        border-bottom: 1px solid rgba(30,30,58,0.5);
+      }
+      .dashboard-table tr:last-child td { border-bottom: none; }
+      .badge {
+        font-size: 11px; padding: 4px 12px;
+        border-radius: 20px; font-weight: 500;
+        display: inline-block;
+      }
+      .badge-progress { background: rgba(33,150,243,0.12); color: #64b5f6; }
+      .badge-planning { background: rgba(255,152,0,0.12); color: #ffb74d; }
+      .badge-done { background: rgba(76,175,80,0.12); color: #81c784; }
+
+      /* Overlays */
+      #overlay {
+        position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        background: rgba(10, 10, 15, 0.95);
+        z-index: 100;
+      }
+      #overlay.hidden { display: none; }
+
+      .spinner {
+        width: 48px; height: 48px;
+        border: 3px solid #1a1a3a; border-top-color: #6c5ce7;
+        border-radius: 50%; animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      #status-text { margin-top: 20px; color: #888; font-size: 14px; text-align: center; }
+      #progress-bar {
+        width: 200px; height: 4px; background: #1a1a3a;
+        border-radius: 2px; margin-top: 12px; overflow: hidden;
+      }
+      #progress-fill {
+        width: 0%; height: 100%;
+        background: linear-gradient(90deg, #6c5ce7, #a29bfe);
+        transition: width 0.3s; border-radius: 2px;
+      }
+
+      #generating {
+        display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(10,10,15,0.85); z-index: 50;
+        align-items: center; justify-content: center; flex-direction: column;
+      }
+      #generating.visible { display: flex; }
+
+      #badge {
+        position: fixed; top: 16px; right: 16px;
+        background: rgba(108,92,231,0.15);
+        border: 1px solid rgba(108,92,231,0.3);
+        border-radius: 6px; padding: 6px 12px;
+        color: #a29bfe; font-size: 11px; z-index: 80;
+      }
+
+      /* ===== BOTTOM PANEL: Image previews + Text chat ===== */
+      #bottom-panel {
+        position: fixed;
+        bottom: 0; left: 0; right: 0;
+        height: 220px;
+        background: rgba(10, 10, 21, 0.85);
+        border-top: 1px solid rgba(108,92,231,0.15);
+        backdrop-filter: blur(12px);
+        z-index: 70;
+        display: flex;
+        gap: 16px;
+        padding: 16px 24px;
+      }
+      #bottom-panel.hidden { display: none; }
+
+      /* Left: image thumbnails */
+      .panel-images {
+        flex: 0 0 55%;
+        display: flex;
+        gap: 12px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        align-items: center;
+        padding-right: 8px;
+      }
+      .panel-images::-webkit-scrollbar { height: 6px; }
+      .panel-images::-webkit-scrollbar-track { background: transparent; }
+      .panel-images::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 3px; }
+      .img-thumb {
+        flex: 0 0 auto;
+        width: 160px;
+        height: 160px;
+        background: rgba(255,255,255,0.04);
+        border: 1.5px solid rgba(255,255,255,0.08);
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #4a4a6a;
+        font-size: 12px;
+        transition: all 0.2s ease;
+        cursor: pointer;
+      }
+      .img-thumb:hover {
+        border-color: rgba(108,92,231,0.3);
+        background: rgba(108,92,231,0.05);
+      }
+      .img-thumb img {
+        width: 100%; height: 100%;
+        object-fit: cover;
+        border-radius: 10px;
+        display: none;
+      }
+      .img-thumb.has-image img { display: block; }
+      .img-thumb.has-image span { display: none; }
+
+      /* Right: text description + chat input */
+      .panel-right {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        min-width: 0;
+      }
+      .panel-text-preview {
+        flex: 1;
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 10px;
+        padding: 12px 14px;
+        color: #a0a0b8;
+        font-size: 12.5px;
+        line-height: 1.5;
         overflow-y: auto;
       }
-      .message {
-        margin-bottom: 18px;
+      .panel-text-preview:empty::before {
+        content: 'Descripcion de la imagen seleccionada...';
+        color: #4a4a6a;
+      }
+      .panel-chat {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .panel-chat input {
+        flex: 1;
         padding: 10px 14px;
+        background: rgba(10,10,21,0.9);
+        border: 1px solid #2a2a4a;
         border-radius: 8px;
+        color: #fff;
+        font-size: 13px;
+        outline: none;
       }
-      .message.user {
-        background: #e3f2fd;
-        margin-left: 20%;
+      .panel-chat input::placeholder { color: #4a4a6a; }
+      .panel-chat button {
+        padding: 10px 18px;
+        background: linear-gradient(135deg, #6c5ce7 0%, #8e7cf5 100%);
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
       }
-      .message.ai {
-        background: #f1f8e9;
-        margin-right: 20%;
+      .panel-chat button:hover {
+        box-shadow: 0 4px 12px rgba(108,92,231,0.3);
       }
     </style>
   </head>
   <body>
-    <h1>PoC Transformers.js v4 + WebGPU</h1>
-    <p>Modelo: <strong>Qwen2.5-Coder-0.5B-Instruct</strong> — Ejecutándose 100% en tu navegador</p>
+    <canvas id="app-canvas" layoutsubtree>
+      <div id="canvas-content"></div>
+    </canvas>
 
-    <div id="status">Iniciando...</div>
+    <div id="overlay">
+      <div class="spinner"></div>
+      <div id="status-text">Iniciando...</div>
+      <div id="progress-bar"><div id="progress-fill"></div></div>
+    </div>
 
-    <textarea id="prompt" placeholder="Escribe tu mensaje aquí..."></textarea><br><br>
-    <button id="generateBtn">Generar Respuesta</button>
+    <div id="generating">
+      <div class="spinner"></div>
+      <p>La IA está generando la interfaz...</p>
+    </div>
 
-    <div id="output"></div>
+    <div id="badge">HTML-in-Canvas + Transformers.js v4</div>
 
-    <p><small>La primera carga descarga el modelo. Después queda en caché para uso offline.</small></p>
+    <div id="bottom-panel">
+      <div class="panel-images" id="panel-images">
+        <div class="img-thumb"><span>Img 1</span><img alt=""></div>
+        <div class="img-thumb"><span>Img 2</span><img alt=""></div>
+        <div class="img-thumb"><span>Img 3</span><img alt=""></div>
+        <div class="img-thumb"><span>Img 4</span><img alt=""></div>
+        <div class="img-thumb"><span>Img 5</span><img alt=""></div>
+        <div class="img-thumb"><span>Img 6</span><img alt=""></div>
+      </div>
+      <div class="panel-right">
+        <div class="panel-text-preview" id="panel-text-preview"></div>
+        <div class="panel-chat">
+          <input id="panel-chat-input" type="text" placeholder="Describe la imagen...">
+          <button id="panel-chat-send">Enviar</button>
+        </div>
+      </div>
+    </div>
 
     <script type="module" src="/src/main.js"></script>
   </body>
