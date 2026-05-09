@@ -4,6 +4,7 @@ env.useWasmCache = true;
 env.logLevel = 'none';
 
 const modelId = "onnx-community/Qwen2.5-Coder-0.5B-Instruct";
+const imageCaptionModelId = "Xenova/vit-gpt2-image-captioning";
 const overlay = document.getElementById('overlay');
 const statusText = document.getElementById('status-text');
 const progressFill = document.getElementById('progress-fill');
@@ -13,6 +14,7 @@ const ctx = canvas.getContext('2d');
 const canvasContent = document.getElementById('canvas-content');
 
 let generator = null;
+let imageCaptioner = null;
 let currentPhase = 'init';
 let loginHTMLCode = null;
 let dashboardHTMLCode = null;
@@ -22,6 +24,12 @@ let useDrawElement = typeof ctx.drawElementImage === 'function';
 let paintRetryCount = 0;
 let transformApplied = false;
 const MAX_PAINT_RETRIES = 5;
+
+// Screen capture history: {dataURL, caption, html, timestamp}
+const screenHistory = [];
+let autoCaptureInterval = null;
+const AUTO_CAPTURE_MS = 10000;
+let isAutoCapturing = false;
 
 // Known valid CSS classes for sanitization
 const VALID_CLASSES = new Set([
@@ -322,7 +330,9 @@ function cleanHTML(raw) {
   html = html.replace(/<\s*link\s+[^>]*>/gi, '');
   html = html.replace(/<\s*script\s*[^>]*>[\s\S]*?<\/\s*script\s*>/gi, '');
   html = html.replace(/<\s*title\s*[^>]*>[\s\S]*?<\/\s*title\s*>/gi, '');
-  html = html.replace(/<\s*style\s*[^>]*>[\s\S]*?<\/\s*style\s*>/gi, '');
+  // Keep inline <style> blocks inside the fragment (they may define dynamic colors)
+  // Only remove external <style> tags that were erroneously generated
+  // html = html.replace(/<\s*style\s*[^>]*>[\s\S]*?<\/\s*style\s*>/gi, '');
   // Remove HTML comments
   html = html.replace(/<!--[\s\S]*?-->/g, '');
   html = html.replace(/\s+onclick\s*=\s*["'][^"']*["']/gi, '');
@@ -335,65 +345,45 @@ function cleanHTML(raw) {
   return html;
 }
 
-async function generateHTML(prompt) {
-  const sys = `You are a strict HTML fragment generator. Output ONLY valid HTML code. No explanations, no markdown, no code blocks.
+async function generateHTML(prompt, maxTokens = 1200) {
+  const sys = `You are a HTML UI generator. Output ONLY HTML. No markdown, no explanations.
 
-STRICT RULES:
-1. ONLY use these exact CSS classes. Any other class will be removed.
-   Login: login-card, login-title, login-subtitle, login-label, login-input, login-btn
-   Dashboard: dashboard-container, dashboard-header, dashboard-title, dashboard-subtitle, dashboard-logout, dashboard-grid, dashboard-card, dashboard-card-label, dashboard-card-value, dashboard-panel, dashboard-panel-title, dashboard-table, badge, badge-progress, badge-planning, badge-done
-   For badges ONLY use: badge-progress, badge-planning, badge-done. NEVER use badge-success, badge-info, badge-warning, badge-danger, or any other badge class.
-2. NO inline styles. NO style attribute anywhere.
-3. NO <html>, <body>, <head>, <meta>, <title>, <link>, <script>, <style> tags.
-4. NO HTML comments <!-- -->
-5. NO onclick, onsubmit, or any event attributes.
-6. IDs must be exact: login -> loginForm, username, password, loginBtn. dashboard -> dashboardView, logoutBtn.
-7. Use semantic tags: h1 for main title, p for text, label for labels, input for fields, button for buttons, table for tables.
+Rules:
+- Use ONLY these CSS classes:
+  Login: login-card, login-title, login-subtitle, login-label, login-input, login-btn
+  Dashboard: dashboard-container, dashboard-header, dashboard-title, dashboard-subtitle, dashboard-logout, dashboard-grid, dashboard-card, dashboard-card-label, dashboard-card-value, dashboard-panel, dashboard-panel-title, dashboard-table, badge, badge-progress, badge-planning, badge-done
+- You MAY use style="background:COLOR; color:COLOR" for color changes ONLY
+- NO <html>, <body>, <head>, <meta>, <script>, <link>, <title>
+- NO onclick attributes
+- IDs exact: loginForm, username, password, loginBtn, dashboardView, logoutBtn
 
-LOGIN EXAMPLE (follow this exact structure):
+LOGIN structure:
 <div id="loginForm" class="login-card">
   <h1 class="login-title">Bienvenido</h1>
-  <p class="login-subtitle">Ingresa tus credenciales</p>
+  <p class="login-subtitle">...</p>
   <label class="login-label">Usuario</label>
-  <input id="username" type="text" placeholder="Usuario" class="login-input">
+  <input id="username" type="text" placeholder="..." class="login-input">
   <label class="login-label">Contrasena</label>
-  <input id="password" type="password" placeholder="Contrasena" class="login-input">
+  <input id="password" type="password" placeholder="..." class="login-input">
   <button id="loginBtn" class="login-btn">Acceder</button>
 </div>
 
-DASHBOARD EXAMPLE (follow this exact structure):
+DASHBOARD structure:
 <div id="dashboardView" class="dashboard-container">
-  <div class="dashboard-header">
-    <div>
-      <h2 class="dashboard-title">Dashboard</h2>
-      <p class="dashboard-subtitle">Panel de Control</p>
-    </div>
-    <button id="logoutBtn" class="dashboard-logout">Cerrar sesion</button>
-  </div>
-  <div class="dashboard-grid">
-    <div class="dashboard-card">
-      <p class="dashboard-card-label">Usuarios</p>
-      <p class="dashboard-card-value">1,248</p>
-    </div>
-    ...
-  </div>
-  <div class="dashboard-panel">
-    <h3 class="dashboard-panel-title">Proyectos Recientes</h3>
-    <table class="dashboard-table">
-      <tr><th>Proyecto</th><th>Estado</th><th>Progreso</th></tr>
-      <tr><td>Rediseño Web</td><td><span class="badge badge-progress">En progreso</span></td><td>75%</td></tr>
-      ...
-    </table>
-  </div>
+  <div class="dashboard-header">...</div>
+  <div class="dashboard-grid">...</div>
+  <div class="dashboard-panel">...</div>
 </div>`;
 
   const textInput = `<|im_start|>system\n${sys}<|im_end|>\n<|im_start|>user\n${prompt}<|im_end|>\n<|im_start|>assistant\n`;
-  const output = await generator(textInput, { max_new_tokens: 900, temperature: 0.2, top_p: 0.85 });
+  const output = await generator(textInput, { max_new_tokens: maxTokens, temperature: 0.3, top_p: 0.9 });
   const generated = output[0].generated_text;
   const newText = generated.slice(textInput.length);
-  console.log('[AI RAW]:', newText.substring(0, 1000));
+  console.log('[AI RAW length]:', newText.length);
+  console.log('[AI RAW preview]:', newText.substring(0, 300));
   const cleaned = cleanHTML(newText);
-  console.log('[AI CLEAN]:', cleaned.substring(0, 1000));
+  console.log('[AI CLEAN length]:', cleaned.length);
+  console.log('[AI CLEAN preview]:', cleaned.substring(0, 300));
   return cleaned;
 }
 
@@ -484,40 +474,246 @@ const panelTextPreview = document.getElementById('panel-text-preview');
 const panelChatInput = document.getElementById('panel-chat-input');
 const panelChatSend = document.getElementById('panel-chat-send');
 
-const MOCK_DESCRIPTIONS = [
-  'Paisaje urbano nocturno con luces de neon reflejadas en el agua.',
-  'Retrato artistico con paleta de colores violeta y azul oscuro.',
-  'Diseno minimalista de interfaz con gradientes suaves.',
-  'Arquitectura moderna con lineas geometricas puras.',
-  'Textura abstracta de particulas flotantes en el espacio.',
-  'Codigo fuente con sintaxis resaltada sobre fondo oscuro.'
-];
+// ===== SCREEN CAPTURE & AI ANALYSIS =====
+
+function dataURLToImage(dataURL) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = dataURL;
+  });
+}
+
+async function describeScreenshot(dataURL) {
+  // Always combine VLM caption with computed style snapshot for rich context
+  const styleInfo = extractStyleSnapshot();
+  let visualCaption = '';
+
+  if (imageCaptioner) {
+    try {
+      const img = await dataURLToImage(dataURL);
+      const output = await imageCaptioner(img);
+      visualCaption = output[0]?.generated_text || '';
+    } catch (e) {
+      console.warn('[describeScreenshot] VLM error:', e.message);
+    }
+  }
+
+  // Combine both sources
+  const combined = visualCaption
+    ? `${visualCaption}. ESTILO ACTUAL: ${styleInfo.desc}`
+    : `Interfaz web. ESTILO ACTUAL: ${styleInfo.desc}`;
+  return combined;
+}
+
+function rgbToHex(rgb) {
+  if (!rgb || rgb === 'rgba(0, 0, 0, 0)') return 'transparent';
+  const match = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  if (!match) return rgb;
+  return '#' + [match[1], match[2], match[3]].map(x => {
+    const hex = parseInt(x).toString(16);
+    return hex.length === 1 ? '0' + hex : hex;
+  }).join('');
+}
+
+function extractStyleSnapshot() {
+  // Rich style extraction from the current visible UI for the prompt context
+  const loginForm = document.getElementById('loginForm');
+  const dashboardView = document.getElementById('dashboardView');
+  const target = loginForm || dashboardView;
+  if (!target) return { type: 'unknown', desc: 'interfaz desconocida' };
+
+  const cs = getComputedStyle(target);
+  const btn = target.querySelector('button');
+  const btnCS = btn ? getComputedStyle(btn) : null;
+  const inputs = target.querySelectorAll('input');
+  const inpCS = inputs[0] ? getComputedStyle(inputs[0]) : null;
+
+  const snapshot = {
+    type: loginForm ? 'login' : 'dashboard',
+    bg: rgbToHex(cs.backgroundColor) || rgbToHex(cs.backgroundImage) || '#12122a',
+    textColor: rgbToHex(cs.color) || '#fff',
+    borderRadius: cs.borderRadius || '16px',
+    padding: cs.padding || '40px',
+    fontFamily: cs.fontFamily || 'system-ui',
+    button: btnCS ? {
+      bg: rgbToHex(btnCS.backgroundColor) || '#6c5ce7',
+      text: rgbToHex(btnCS.color) || '#fff',
+      radius: btnCS.borderRadius || '8px'
+    } : null,
+    input: inpCS ? {
+      bg: rgbToHex(inpCS.backgroundColor) || '#0a0a15',
+      border: rgbToHex(inpCS.borderColor) || '#2a2a4a',
+      text: rgbToHex(inpCS.color) || '#fff'
+    } : null
+  };
+
+  let desc = `${snapshot.type === 'login' ? 'Formulario de login' : 'Dashboard'} con `;
+  desc += `fondo ${snapshot.bg}, texto ${snapshot.textColor}, `;
+  desc += `bordes redondeados ${snapshot.borderRadius}, `;
+  desc += `fuente ${snapshot.fontFamily}. `;
+  if (snapshot.button) {
+    desc += `Boton: fondo ${snapshot.button.bg}, texto ${snapshot.button.text}, radio ${snapshot.button.radius}. `;
+  }
+  if (snapshot.input) {
+    desc += `Input: fondo ${snapshot.input.bg}, borde ${snapshot.input.border}, texto ${snapshot.input.text}.`;
+  }
+
+  return { type: snapshot.type, desc, snapshot };
+}
+
+async function captureAndAnalyze() {
+  if (!generator) return;
+  try {
+    // Capture canvas screenshot
+    const dataURL = canvas.toDataURL('image/png');
+
+    // Get AI description of the screenshot
+    const caption = await describeScreenshot(dataURL);
+    console.log('[Capture] Caption:', caption);
+
+    // Store in history
+    const entry = {
+      dataURL,
+      caption,
+      html: canvasContent.innerHTML,
+      timestamp: Date.now()
+    };
+    screenHistory.push(entry);
+
+    // Update thumbnails panel
+    renderThumbnails();
+
+    // Show latest caption in preview
+    if (panelTextPreview) {
+      panelTextPreview.textContent = `[Analisis #${screenHistory.length}]: ${caption}`;
+    }
+
+    console.log('[Capture] Screenshot saved. Total:', screenHistory.length);
+  } catch (e) {
+    console.error('[captureAndAnalyze] Error:', e);
+  }
+}
+
+function renderThumbnails() {
+  if (!panelImages) return;
+  panelImages.innerHTML = '';
+  screenHistory.forEach((entry, idx) => {
+    const thumb = document.createElement('div');
+    thumb.className = 'img-thumb has-image';
+    thumb.innerHTML = `<img src="${entry.dataURL}" alt="Capture ${idx + 1}">`;
+    thumb.onclick = () => {
+      // Highlight selected
+      Array.from(panelImages.children).forEach(t => t.style.borderColor = 'rgba(255,255,255,0.08)');
+      thumb.style.borderColor = 'rgba(108,92,231,0.5)';
+      // Show caption
+      if (panelTextPreview) {
+        panelTextPreview.textContent = `[Analisis #${idx + 1}]: ${entry.caption}`;
+      }
+    };
+    panelImages.appendChild(thumb);
+  });
+  // Auto-scroll to latest
+  panelImages.scrollLeft = panelImages.scrollWidth;
+}
+
+function startAutoCapture() {
+  if (autoCaptureInterval) return;
+  isAutoCapturing = true;
+  autoCaptureInterval = setInterval(captureAndAnalyze, AUTO_CAPTURE_MS);
+  console.log('[AutoCapture] Started');
+}
+
+function stopAutoCapture() {
+  if (autoCaptureInterval) {
+    clearInterval(autoCaptureInterval);
+    autoCaptureInterval = null;
+  }
+  isAutoCapturing = false;
+  console.log('[AutoCapture] Stopped');
+}
+
+// ===== PANEL CHAT: GENERATE UI BASED ON SCREENSHOT + USER PROMPT =====
+
+async function handlePanelChat() {
+  const text = panelChatInput.value.trim();
+  if (!text) return;
+  if (!generator) {
+    if (panelTextPreview) panelTextPreview.textContent = 'Error: Modelo no cargado';
+    return;
+  }
+
+  // Get latest screen analysis with rich style info
+  const lastEntry = screenHistory[screenHistory.length - 1];
+  const styleInfo = extractStyleSnapshot();
+  const currentDesc = lastEntry ? lastEntry.caption : styleInfo.desc;
+  const isLogin = styleInfo.type === 'login';
+
+  panelChatInput.value = '';
+  if (panelTextPreview) {
+    panelTextPreview.textContent = `Generando: "${text}"...`;
+  }
+  showGenerating(true);
+
+  try {
+    // Short, direct prompt for the tiny 0.5B model
+    const combinedPrompt = isLogin
+      ? `Recreate this login form with style changes: ${text}. Use classes: login-card, login-title, login-subtitle, login-label, login-input, login-btn. IDs: loginForm, username, password, loginBtn. Use style="" only for colors. Output HTML only.`
+      : `Recreate this dashboard with style changes: ${text}. Use classes: dashboard-container, dashboard-header, dashboard-title, dashboard-subtitle, dashboard-logout, dashboard-grid, dashboard-card, dashboard-card-label, dashboard-card-value, dashboard-panel, dashboard-panel-title, dashboard-table, badge, badge-progress, badge-planning, badge-done. IDs: dashboardView, logoutBtn. Use style="" only for colors. Output HTML only.`;
+
+    const newHTML = await generateHTML(combinedPrompt);
+    console.log('[Chat] Generated HTML length:', newHTML.length);
+    console.log('[Chat] Generated HTML preview:', newHTML.substring(0, 200));
+
+    // Validate generated HTML
+    if (!newHTML || newHTML.trim().length < 50) {
+      throw new Error('HTML generado vacio o incompleto');
+    }
+
+    // Determine if it's login or dashboard based on content
+    if (newHTML.includes('loginForm') || newHTML.includes('login-card')) {
+      loginHTMLCode = newHTML;
+      currentPhase = 'login';
+      renderLogin();
+    } else if (newHTML.includes('dashboardView') || newHTML.includes('dashboard-container')) {
+      dashboardHTMLCode = newHTML;
+      currentPhase = 'dashboard';
+      renderDashboard();
+    } else {
+      // Unknown structure - fallback to current view with original HTML
+      console.warn('[Chat] HTML no reconocido, usando fallback');
+      if (isLogin) {
+        renderFallbackLogin();
+      } else {
+        renderFallbackDashboard();
+      }
+    }
+
+    if (panelTextPreview) {
+      panelTextPreview.textContent = `[OK]: "${text}"`;
+    }
+  } catch (err) {
+    console.error('[handlePanelChat] Generation failed:', err);
+    if (panelTextPreview) panelTextPreview.textContent = 'Error: usando diseño base';
+    // Fallback to original
+    if (isLogin) {
+      renderFallbackLogin();
+    } else {
+      renderFallbackDashboard();
+    }
+  } finally {
+    showGenerating(false);
+  }
+}
 
 function bindPanelEvents() {
   if (!panelImages) return;
-  const thumbs = panelImages.querySelectorAll('.img-thumb');
-  thumbs.forEach((thumb, idx) => {
-    thumb.onclick = () => {
-      // Highlight selected
-      thumbs.forEach(t => t.style.borderColor = 'rgba(255,255,255,0.08)');
-      thumb.style.borderColor = 'rgba(108,92,231,0.5)';
-      // Show description
-      if (panelTextPreview) {
-        panelTextPreview.textContent = MOCK_DESCRIPTIONS[idx] || '';
-      }
-    };
-  });
 
   if (panelChatSend && panelChatInput) {
-    panelChatSend.onclick = () => {
-      const text = panelChatInput.value.trim();
-      if (text && panelTextPreview) {
-        panelTextPreview.textContent = `[Prompt]: ${text}`;
-        panelChatInput.value = '';
-      }
-    };
+    panelChatSend.onclick = handlePanelChat;
     panelChatInput.onkeydown = e => {
-      if (e.key === 'Enter') panelChatSend.click();
+      if (e.key === 'Enter') handlePanelChat();
     };
   }
 }
@@ -657,6 +853,23 @@ async function init() {
       }
     });
 
+    statusText.textContent = 'Cargando modelo de vision...';
+    try {
+      imageCaptioner = await pipeline("image-to-text", imageCaptionModelId, {
+        device: "webgpu",
+        progress_callback: (data) => {
+          if (data.status === "progress_total") {
+            progressFill.style.width = Math.round(data.progress) + '%';
+            statusText.textContent = `Descargando Vision: ${Math.round(data.progress)}%`;
+          }
+        }
+      });
+      console.log('[Vision] Modelo cargado');
+    } catch (visionErr) {
+      console.warn('[Vision] No se pudo cargar modelo de vision:', visionErr.message);
+      imageCaptioner = null;
+    }
+
     statusText.textContent = 'Generando login con IA...';
     showGenerating(true);
     currentPhase = 'generating-login';
@@ -680,6 +893,10 @@ Container id="loginForm", class="login-card". NO onclick.`);
 
     showGenerating(false);
     overlay.classList.add('hidden');
+
+    // Start periodic screen capture after models are loaded
+    startAutoCapture();
+    console.log('[Init] Auto-capture iniciado cada', AUTO_CAPTURE_MS, 'ms');
   } catch (err) {
     statusText.textContent = 'Error: ' + err.message;
   }
